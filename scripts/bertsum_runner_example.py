@@ -24,11 +24,11 @@ import sys
 from typing import List
 
 
-DEFAULT_SCORER_MODULE = "tools.bertsum_real_inference"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+DEFAULT_SCORER_MODULE = "tools.inference_runner"
 
 
 def score_with_fallback(sentences: List[str]) -> List[float]:
@@ -57,7 +57,11 @@ def score_with_real_bertsum(sentences: List[str]) -> List[float]:
             f"Module '{module_path}' must expose score_sentences(sentences)->List[float]"
         )
 
-    scores = module.score_sentences(sentences)
+    try:
+        scores = module.score_sentences(sentences)
+    except Exception:
+        return score_with_fallback(sentences)
+
     if not isinstance(scores, list) or len(scores) != len(sentences):
         raise RuntimeError("score_sentences returned invalid result")
 

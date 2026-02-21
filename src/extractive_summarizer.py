@@ -19,6 +19,14 @@ class SentenceScore:
     score: float
 
 
+@dataclass(frozen=True)
+class SentenceCandidate:
+    score: float
+    length: int
+    position: int
+    sentence: str
+
+
 def split_sentences(text: str) -> List[str]:
     compact = re.sub(r"\s+", " ", text).strip()
     if not compact:
@@ -127,36 +135,46 @@ def summarize_extractive(
     similarity_threshold: float = 0.72,
     backend: str = "local",
     bertsum_runner: str | None = None,
+    debug_compare: bool = False,
 ) -> str:
     sentences = split_sentences(context)
     if not sentences:
         return ""
 
     scores = score_sentences(sentences, backend=backend, bertsum_runner=bertsum_runner)
+    candidates = [
+        SentenceCandidate(score=sc, length=len(s), position=i, sentence=s)
+        for i, (s, sc) in enumerate(zip(sentences, scores))
+    ]
     ranked = sorted(
-        (SentenceScore(i, s, sc) for i, (s, sc) in enumerate(zip(sentences, scores))),
+        (SentenceScore(c.position, c.sentence, c.score) for c in candidates),
         key=lambda x: x.score,
         reverse=True,
     )
 
-    selected: List[Tuple[int, str]] = []
-    current = ""
+    greedy_selected = _select_greedy(ranked, max_chars=max_chars, similarity_threshold=similarity_threshold)
+    optimal_selected = _select_optimal_knapsack(candidates, max_chars=max_chars)
 
-    for item in ranked:
-        if any(_jaccard(item.sentence, picked) >= similarity_threshold for _, picked in selected):
-            continue
-        candidate = f"{current} {item.sentence}".strip() if current else item.sentence
-        if len(candidate) <= max_chars:
-            selected.append((item.idx, item.sentence))
-            current = candidate
-        if len(current) >= max_chars - 10:
-            break
+    selected = optimal_selected
 
-    selected.sort(key=lambda x: x[0])
-    summary = " ".join(s for _, s in selected).strip()
+    if debug_compare:
+        greedy_summary = _join_selected(sentences, greedy_selected)
+        optimal_summary = _join_selected(sentences, optimal_selected)
+        print(
+            "[debug] greedy "
+            f"indices={greedy_selected} chars={len(greedy_summary)} score_sum={_score_sum(scores, greedy_selected):.4f} "
+            f"summary={greedy_summary}"
+        )
+        print(
+            "[debug] optimal "
+            f"indices={optimal_selected} chars={len(optimal_summary)} score_sum={_score_sum(scores, optimal_selected):.4f} "
+            f"summary={optimal_summary}"
+        )
+
+    summary = _join_selected(sentences, selected)
 
     if len(summary) < min_chars:
-        used = {i for i, _ in selected}
+        used = set(selected)
         for item in ranked:
             if item.idx in used:
                 continue
@@ -172,6 +190,68 @@ def summarize_extractive(
         summary = " ".join(segments).strip()
 
     return summary
+
+
+def _select_greedy(
+    ranked: Sequence[SentenceScore],
+    max_chars: int,
+    similarity_threshold: float,
+) -> List[int]:
+    selected: List[Tuple[int, str]] = []
+    current = ""
+    for item in ranked:
+        if any(_jaccard(item.sentence, picked) >= similarity_threshold for _, picked in selected):
+            continue
+        candidate = f"{current} {item.sentence}".strip() if current else item.sentence
+        if len(candidate) <= max_chars:
+            selected.append((item.idx, item.sentence))
+            current = candidate
+        if len(current) >= max_chars - 10:
+            break
+    return sorted(i for i, _ in selected)
+
+
+def _select_optimal_knapsack(candidates: Sequence[SentenceCandidate], max_chars: int) -> List[int]:
+    capacity = max_chars + 1
+    states: dict[int, Tuple[float, Tuple[int, ...]]] = {0: (0.0, ())}
+
+    for cand in candidates:
+        cost = cand.length + 1
+        next_states = dict(states)
+        for used, (score_sum, picked) in states.items():
+            new_used = used + cost
+            if new_used > capacity:
+                continue
+            new_score = score_sum + cand.score
+            new_picked = tuple(sorted((*picked, cand.position)))
+            prev = next_states.get(new_used)
+            if prev is None or new_score > prev[0]:
+                next_states[new_used] = (new_score, new_picked)
+        states = next_states
+
+    best_score = float("-inf")
+    best_used = 0
+    best_picked: Tuple[int, ...] = ()
+    for used, (score_sum, picked) in states.items():
+        if not picked:
+            continue
+        if score_sum > best_score:
+            best_score = score_sum
+            best_used = used
+            best_picked = picked
+        elif score_sum == best_score and used > best_used:
+            best_used = used
+            best_picked = picked
+
+    return list(best_picked)
+
+
+def _join_selected(sentences: Sequence[str], selected_indices: Sequence[int]) -> str:
+    return " ".join(sentences[i] for i in sorted(selected_indices)).strip()
+
+
+def _score_sum(scores: Sequence[float], selected_indices: Sequence[int]) -> float:
+    return sum(scores[i] for i in selected_indices)
 
 
 def _read_input(text: str | None, path: str | None) -> str:
@@ -200,6 +280,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=None,
         help="Path to bertsum-korean inference runner script",
     )
+    parser.add_argument(
+        "--debug-compare",
+        action="store_true",
+        help="Log greedy vs optimal selection on the same input",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     context = _read_input(args.text, args.input_file)
@@ -208,6 +293,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         max_chars=args.max_chars,
         backend=args.backend,
         bertsum_runner=args.bertsum_runner,
+        debug_compare=args.debug_compare,
     )
     print(summary)
     print(f"[chars={len(summary)}]")

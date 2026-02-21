@@ -5,10 +5,10 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Protocol, Sequence, Tuple
 
 
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_SENTENCE_RE = re.compile(r'.+?(?:[.!?]["\'”’）)\]]*)(?:\s+|$)')
 _WORD_RE = re.compile(r"[가-힣A-Za-z0-9]+")
 
 
@@ -19,12 +19,61 @@ class SentenceScore:
     score: float
 
 
-def split_sentences(text: str) -> List[str]:
-    compact = re.sub(r"\s+", " ", text).strip()
-    if not compact:
-        return []
-    parts = _SENT_SPLIT_RE.split(compact)
-    return [p.strip() for p in parts if p.strip()]
+class SentenceSplitter(Protocol):
+    def split(self, text: str) -> List[str]:
+        ...
+
+
+class RegexSentenceSplitter:
+    """Default regex-based sentence splitter."""
+
+    def split(self, text: str) -> List[str]:
+        compact = re.sub(r"\s+", " ", text).strip()
+        if not compact:
+            return []
+
+        segments = [m.group(0).strip() for m in _SENTENCE_RE.finditer(compact)]
+        if segments:
+            return segments
+        return [compact]
+
+
+class KoreanAdvancedSentenceSplitter:
+    """Korean-optimized splitter based on optional third-party library."""
+
+    def split(self, text: str) -> List[str]:
+        compact = re.sub(r"\s+", " ", text).strip()
+        if not compact:
+            return []
+
+        try:
+            import kss
+        except ImportError as exc:  # pragma: no cover - exercised only with optional dependency.
+            raise RuntimeError(
+                "korean-advanced splitter requires `kss` package. "
+                "Install it with `pip install kss`."
+            ) from exc
+
+        return [seg.strip() for seg in kss.split_sentences(compact) if seg.strip()]
+
+
+def get_sentence_splitter(splitter: str | SentenceSplitter | None) -> SentenceSplitter:
+    if splitter is None:
+        return RegexSentenceSplitter()
+    if isinstance(splitter, str):
+        if splitter == "default":
+            return RegexSentenceSplitter()
+        if splitter == "korean-advanced":
+            return KoreanAdvancedSentenceSplitter()
+        raise ValueError(f"Unsupported sentence splitter: {splitter}")
+    return splitter
+
+
+def split_sentences(
+    text: str,
+    splitter: str | SentenceSplitter | None = None,
+) -> List[str]:
+    return get_sentence_splitter(splitter).split(text)
 
 
 def _tokens(text: str) -> List[str]:
@@ -127,8 +176,9 @@ def summarize_extractive(
     similarity_threshold: float = 0.72,
     backend: str = "local",
     bertsum_runner: str | None = None,
+    sentence_splitter: str | SentenceSplitter | None = None,
 ) -> str:
-    sentences = split_sentences(context)
+    sentences = split_sentences(context, splitter=sentence_splitter)
     if not sentences:
         return ""
 
@@ -166,7 +216,7 @@ def summarize_extractive(
                 break
 
     if len(summary) > max_chars:
-        segments = split_sentences(summary)
+        segments = split_sentences(summary, splitter=sentence_splitter)
         while segments and len(" ".join(segments)) > max_chars:
             segments.pop()
         summary = " ".join(segments).strip()
@@ -200,6 +250,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=None,
         help="Path to bertsum-korean inference runner script",
     )
+    parser.add_argument(
+        "--sentence-splitter",
+        choices=["default", "korean-advanced"],
+        default="default",
+        help="Sentence splitting strategy",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     context = _read_input(args.text, args.input_file)
@@ -208,6 +264,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         max_chars=args.max_chars,
         backend=args.backend,
         bertsum_runner=args.bertsum_runner,
+        sentence_splitter=args.sentence_splitter,
     )
     print(summary)
     print(f"[chars={len(summary)}]")

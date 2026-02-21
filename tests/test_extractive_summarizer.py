@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from src.extractive_summarizer import summarize_extractive
+from src.extractive_summarizer import split_sentences, summarize_extractive
 
 
 def test_summary_respects_max_chars():
@@ -47,9 +47,42 @@ def test_cli_bertsum_backend_with_runner_script_env_config():
         "scripts/bertsum_runner_example.py",
     ]
     env = {
+        **os.environ,
         "BERTSUM_KOREAN_REPO": ".",
         "BERTSUM_KOREAN_SCORER": "tools.inference_runner",
-        **os.environ,
+        "BERTSUM_USE_FALLBACK": "1",
     }
     completed = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
     assert "[chars=" in completed.stdout
+
+
+def test_split_sentences_handles_quotes_and_parentheses():
+    text = '그는 말했다. "정말인가?" (확실해!) 그리고 끝.'
+    assert split_sentences(text) == ["그는 말했다.", '"정말인가?"', "(확실해!)", "그리고 끝."]
+
+
+def test_split_sentences_handles_newlines_and_special_characters():
+    text = "첫 줄입니다.\n둘째 줄입니다?!\n\n#해시태그 테스트. 마지막🙂문장입니다!"
+    assert split_sentences(text) == [
+        "첫 줄입니다.",
+        "둘째 줄입니다?!",
+        "#해시태그 테스트.",
+        "마지막🙂문장입니다!",
+    ]
+
+
+def test_split_sentences_accepts_custom_splitter():
+    class DummySplitter:
+        def split(self, text: str):
+            return ["A", "B"]
+
+    assert split_sentences("무시되는 입력", splitter=DummySplitter()) == ["A", "B"]
+
+
+def test_korean_advanced_splitter_available_or_reports_missing_dependency():
+    try:
+        result = split_sentences("문장입니다. 다음 문장입니다.", splitter="korean-advanced")
+    except RuntimeError as exc:
+        assert "requires `kss` package" in str(exc)
+    else:
+        assert result
